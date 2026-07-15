@@ -358,6 +358,8 @@ const routes = {
   "dashboard": viewDashboard,
   "setup": viewSetup,
   "interview": viewInterview,
+  "round": viewRound,
+  "transition": viewRoundTransition,
   "analysis": viewAnalysis,
   "results": viewResults,
   "history": viewHistory,
@@ -376,7 +378,7 @@ function router() {
   const queryIndex = hashPath.indexOf("?");
   let path = queryIndex !== -1 ? hashPath.substring(0, queryIndex) : hashPath;
   
-  if (path !== "interview") {
+  if (path !== "interview" && path !== "round") {
     stopActiveCamera();
     stopActiveSpeechRecognition();
   }
@@ -396,7 +398,7 @@ function router() {
   
   // Toggle sidebar/header visibility depending on page type
   const shell = document.getElementById("app-shell");
-  const distractionFreeViews = ["landing", "login", "signup", "interview", "analysis"];
+  const distractionFreeViews = ["landing", "login", "signup", "interview", "round", "transition", "analysis"];
   
   if (distractionFreeViews.includes(path)) {
     shell.classList.add("sidebar-hidden");
@@ -1238,6 +1240,11 @@ function drawGrowthChart(canvasId) {
 
 // --- Setup View ---
 function viewSetup() {
+  return viewSetupWizard();
+}
+
+// ponytail: old 3-step wizard kept dead below; live wizard is viewSetupWizard() (5 steps).
+function viewSetupOld_UNUSED() {
   const view = document.getElementById("app-view");
   view.innerHTML = `
     <div class="setup-container">
@@ -1541,53 +1548,481 @@ function viewSetup() {
   renderStep();
 }
 
-async function startInterviewSession(setup) {
-  showToast("Preparing your AI interviewer...", "info");
-  
-  let qList = [];
-  try {
-    const roleParam = encodeURIComponent(setup.roleName);
-    const catParam = encodeURIComponent(
-      setup.category === "hr"
-        ? "HR Mock"
-        : setup.category === "coding"
-          ? "Coding Interview"
-          : "Technical"
-    );
-    const res = await fetch(`${API_BASE}/questions?role=${roleParam}&category=${catParam}`);
-    
-    if (res.ok) {
-      qList = await res.json();
-    }
-  } catch (err) {
-    console.error("Backend questions API failed, falling back to local pool", err);
-  }
-  
-  if (!qList || qList.length === 0) {
-    qList = MOCK_QUESTIONS[setup.category] || MOCK_QUESTIONS.frontend;
-  }
-  
-  const count = setup.duration === "5" ? 2 : setup.duration === "10" ? 3 : 4;
-  qList = qList.slice(0, count);
-  
-  APP_STATE.currentInterview = {
-    role: setup.roleName,
-    category: setup.category === "hr" ? "HR Mock" : setup.category === "coding" ? "Coding Interview" : "Technical",
-    difficulty: setup.difficulty,
-    duration: `${setup.duration} mins`,
-    questions: qList,
-    currentQuestionIndex: 0,
-    answers: [],
-    timeRemaining: parseInt(setup.duration) * 60, // in seconds
-    timerInterval: null,
-    webcamEnabled: setup.webcamEnabled || false,
-    language: setup.language || "Python",
-    aiVoiceEnabled: setup.aiVoiceEnabled !== false
+// =====================================================================
+// Setup Wizard (mode → role → level → settings → confirm)
+// =====================================================================
+function viewSetupWizard() {
+  const view = document.getElementById("app-view");
+  const STEP_LABELS = ["Mode", "Role", "Level", "Settings", "Confirm"];
+  const STEP_CAPTIONS = [
+    "Choose your interview mode.", "Pick the job role.", "Select difficulty level.",
+    "Optional settings.", "Review and start."
+  ];
+  let currentStep = 1;
+
+  const setupData = {
+    mode: "full",
+    quickRound: "mcq",
+    roleId: "frontend",
+    level: "easy",
+    webcamEnabled: APP_STATE.settings.webcamEnabled || false,
+    aiVoiceEnabled: APP_STATE.settings.aiVoiceEnabled !== false,
+    language: "Python",
+    resumeUploaded: !!APP_STATE.user.resumeName,
+    fileName: APP_STATE.user.resumeName || ""
   };
-  
-  setTimeout(() => {
-    window.location.hash = "#/interview";
+
+  view.innerHTML = `
+    <div class="setup-container">
+      <div class="section-header" style="margin-bottom:20px;">
+        <h2>Configure Your Mock Interview</h2>
+        <p id="setup-step-caption">Step 1 of 5 — ${STEP_CAPTIONS[0]}</p>
+      </div>
+      <div class="setup-progress-steps" id="setup-progress-steps"></div>
+      <div class="card" id="setup-card-content"></div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px;">
+        <button id="setup-back-btn" class="btn btn-secondary" style="visibility:hidden;">Back</button>
+        <button id="setup-next-btn" class="btn btn-primary">Next Step</button>
+      </div>
+    </div>`;
+
+  const setupCard = document.getElementById("setup-card-content");
+  const nextBtn = document.getElementById("setup-next-btn");
+  const backBtn = document.getElementById("setup-back-btn");
+  const caption = document.getElementById("setup-step-caption");
+
+  window.selectMode = (m) => { setupData.mode = m; renderStep(); };
+  window.selectQuickRound = (r) => { setupData.quickRound = r; renderStep(); };
+  window.selectRoleCard = (id) => { setupData.roleId = id; renderStep(); };
+  window.selectLevelCard = (lv) => { setupData.level = lv; renderStep(); };
+  window.toggleSetupWebcam = (el) => { setupData.webcamEnabled = el.checked; APP_STATE.settings.webcamEnabled = el.checked; saveStateToStorage(); };
+  window.toggleSetupVoice = (el) => { setupData.aiVoiceEnabled = el.checked; APP_STATE.settings.aiVoiceEnabled = el.checked; saveStateToStorage(); };
+  window.toggleSetupLanguage = (el) => { setupData.language = el.value; };
+  window.triggerResumeUpload = () => document.getElementById("setup-resume-file").click();
+  window.handleResumeFile = (input) => {
+    if (input.files && input.files[0]) {
+      setupData.resumeUploaded = true; setupData.fileName = input.files[0].name;
+      showToast("Resume uploaded successfully!"); renderStep();
+    }
+  };
+  window.removeResume = (e) => { e.stopPropagation(); setupData.resumeUploaded = false; setupData.fileName = ""; renderStep(); };
+
+  function progressDots() {
+    return STEP_LABELS.map((lbl, i) => {
+      const n = i + 1;
+      const cls = n < currentStep ? "completed" : n === currentStep ? "active" : "";
+      return `<div class="step-indicator ${cls}"><div class="step-circle">${n}</div><span class="step-label">${lbl}</span></div>`;
+    }).join("");
+  }
+
+  function renderModeStep() {
+    const q = setupData.mode === "quick";
+    return `
+      <h3 class="setup-step-title">1. Interview Mode</h3>
+      <div class="mode-grid">
+        <div class="mode-card ${setupData.mode === 'full' ? 'selected' : ''}" onclick="selectMode('full')">
+          <div class="setup-option-icon"><i data-lucide="trophy"></i></div>
+          <h4>Full Interview</h4>
+          <p>All 3 rounds: MCQ → Live Interview → Coding / Case Study.</p>
+        </div>
+        <div class="mode-card ${q ? 'selected' : ''}" onclick="selectMode('quick')">
+          <div class="setup-option-icon"><i data-lucide="zap"></i></div>
+          <h4>Quick Practice</h4>
+          <p>A single round of your choice.</p>
+        </div>
+      </div>
+      ${q ? `<div class="quick-round-row">
+        ${["mcq", "interview", "coding"].map(r => `<button class="round-chip ${setupData.quickRound === r ? 'selected' : ''}" onclick="selectQuickRound('${r}')">${r === 'mcq' ? 'MCQ' : r === 'interview' ? 'Live Interview' : 'Coding / Case Study'}</button>`).join("")}
+      </div>` : ''}`;
+  }
+
+  function renderRoleStep() {
+    return `<h3 class="setup-step-title">2. Choose Role</h3>
+      <div class="role-grid">
+        ${ROLES.map(r => `
+          <div class="role-card ${setupData.roleId === r.id ? 'selected' : ''}" onclick="selectRoleCard('${r.id}')">
+            <div class="selected-check"><i data-lucide="check"></i></div>
+            <div class="role-card-icon"><i data-lucide="${r.icon}"></i></div>
+            <h4>${r.name}</h4>
+            <span class="role-card-tag">${r.authored ? 'Full bank' : 'Preview'}</span>
+          </div>`).join("")}
+      </div>
+      <p class="role-grid-note">Roles marked “Preview” reuse a closely-related role's questions until their own bank is authored.</p>`;
+  }
+
+  function renderLevelStep() {
+    const topics = LEVEL_TOPICS[setupData.roleId] || null;
+    const generic = { easy: "Fundamentals & core concepts", medium: "Applied, intermediate depth", advanced: "System-level & senior depth" };
+    const role = getRole(setupData.roleId);
+    return `<h3 class="setup-step-title">3. Difficulty Level</h3>
+      <div class="level-list">
+        ${["easy", "medium", "advanced"].map(lv => {
+          const r = LEVEL_RULES[lv];
+          const t = topics ? topics[lv] : generic[lv];
+          return `<div class="level-card level-${r.color} ${setupData.level === lv ? 'selected' : ''}" onclick="selectLevelCard('${lv}')">
+            <div class="level-card-head"><span class="level-badge level-${r.color}">${r.label}</span><span class="level-card-tag">${r.tag}</span></div>
+            <p class="level-card-topics">${t}</p>
+            <div class="level-card-meta">${r.mcqCount} MCQs · ${r.interviewCount} Interview Qs · ${r.codingCount} ${role.hasCoding ? 'Coding' : 'Case Study'} · pass ≥ ${r.pass}%</div>
+          </div>`;
+        }).join("")}
+      </div>`;
+  }
+
+  function renderSettingsStep() {
+    const role = getRole(setupData.roleId);
+    return `<h3 class="setup-step-title">4. Settings</h3>
+      ${role.hasCoding ? `<div class="form-group"><label class="form-label" for="setup-language">Coding Language</label>
+        <select id="setup-language" class="form-input" onchange="toggleSetupLanguage(this)">
+          <option value="Python" ${setupData.language === 'Python' ? 'selected' : ''}>Python</option>
+          <option value="JavaScript" ${setupData.language === 'JavaScript' ? 'selected' : ''}>JavaScript (Node.js)</option>
+          <option value="Java" ${setupData.language === 'Java' ? 'selected' : ''}>Java</option>
+        </select></div>` : ''}
+      <div class="form-group" style="margin-top:16px;"><label class="form-label">Video</label>
+        <label class="checkbox-container" style="margin-top:8px;"><input type="checkbox" ${setupData.webcamEnabled ? 'checked' : ''} onchange="toggleSetupWebcam(this)"> Enable webcam preview (Live Interview round)</label></div>
+      <div class="form-group" style="margin-top:16px;"><label class="form-label">Voice</label>
+        <label class="checkbox-container" style="margin-top:8px;"><input type="checkbox" ${setupData.aiVoiceEnabled ? 'checked' : ''} onchange="toggleSetupVoice(this)"> Read questions aloud (AI voice)</label></div>
+      <div class="form-group" style="margin-top:16px;"><label class="form-label">Resume (optional)</label>
+        <div class="resume-upload-zone" onclick="triggerResumeUpload()"><i data-lucide="file-text"></i><h4>Click to upload resume</h4><p>Used for personalization.</p>
+          <input type="file" id="setup-resume-file" style="display:none;" onchange="handleResumeFile(this)"></div>
+        <div class="resume-file-info ${setupData.resumeUploaded ? '' : 'hidden'}"><i data-lucide="check-circle" style="color:var(--success);"></i> <span>${setupData.fileName}</span>
+          <button class="ghost-btn-sm" style="color:var(--error); margin-left:auto;" onclick="removeResume(event)">Remove</button></div></div>`;
+  }
+
+  function renderConfirmStep() {
+    const role = getRole(setupData.roleId);
+    const r = LEVEL_RULES[setupData.level];
+    const rounds = setupData.mode === "full" ? ["mcq", "interview", "coding"] : [setupData.quickRound];
+    const roundNames = rounds.map(rt => rt === 'mcq' ? `MCQ (${r.mcqCount} Qs)` : rt === 'interview' ? `Live Interview (${r.interviewCount} Qs)` : (role.hasCoding ? `Coding (${r.codingCount})` : `Case Study (${r.codingCount})`)).join(" → ");
+    const row = (k, v) => `<div class="confirm-row"><span>${k}</span><strong>${v}</strong></div>`;
+    return `<h3 class="setup-step-title">5. Confirm</h3>
+      ${row("Mode", setupData.mode === 'full' ? 'Full Interview' : 'Quick Practice')}
+      ${row("Role", role.name)}
+      ${row("Level", `${r.label} — ${r.tag}`)}
+      ${row("Rounds", roundNames)}
+      ${role.hasCoding ? row("Language", setupData.language) : ''}
+      ${row("Webcam", setupData.webcamEnabled ? 'Enabled' : 'Disabled')}
+      ${row("AI Voice", setupData.aiVoiceEnabled ? 'Enabled' : 'Disabled')}
+      <div class="badge badge-info" style="margin-top:20px; display:flex; gap:8px; padding:12px 16px;"><i data-lucide="info" style="width:16px;height:16px;"></i><span>Timers scale with level — MCQ ${r.mcqTimer}s per question.</span></div>`;
+  }
+
+  function renderStep() {
+    document.getElementById("setup-progress-steps").innerHTML = progressDots();
+    backBtn.style.visibility = currentStep === 1 ? "hidden" : "visible";
+    nextBtn.innerText = currentStep === 5 ? "Start Interview" : "Next Step";
+    caption.innerText = `Step ${currentStep} of 5 — ${STEP_CAPTIONS[currentStep - 1]}`;
+    if (currentStep === 1) setupCard.innerHTML = renderModeStep();
+    else if (currentStep === 2) setupCard.innerHTML = renderRoleStep();
+    else if (currentStep === 3) setupCard.innerHTML = renderLevelStep();
+    else if (currentStep === 4) setupCard.innerHTML = renderSettingsStep();
+    else setupCard.innerHTML = renderConfirmStep();
+    lucide.createIcons();
+  }
+
+  nextBtn.addEventListener("click", () => {
+    if (currentStep === 4) {
+      const langEl = document.getElementById("setup-language");
+      if (langEl) setupData.language = langEl.value;
+    }
+    if (currentStep < 5) { currentStep++; renderStep(); }
+    else startInterviewSession(setupData);
+  });
+  backBtn.addEventListener("click", () => { if (currentStep > 1) { currentStep--; renderStep(); } });
+
+  renderStep();
+}
+
+// =====================================================================
+// 3-Round Interview Engine
+// =====================================================================
+function roundCategoryLabel(type, role) {
+  if (type === "mcq") return "MCQ Round";
+  if (type === "interview") return "Live Interview";
+  return role.hasCoding ? "Coding Interview" : "Case Study";
+}
+
+async function startInterviewSession(setup) {
+  const role = getRole(setup.roleId);
+  const rules = getLevelRules(setup.level);
+  const rounds = setup.mode === "full" ? ["mcq", "interview", "coding"] : [setup.quickRound];
+
+  APP_STATE.currentInterview = {
+    mode: setup.mode,
+    roleId: role.id,
+    role: role.name,          // display name (kept for legacy refs)
+    roleName: role.name,
+    hasCoding: role.hasCoding,
+    level: setup.level,
+    levelRules: rules,
+    difficulty: rules.label,
+    category: rounds.length === 1 ? roundCategoryLabel(rounds[0], role) : "Full Interview",
+    durationLabel: `${rules.label} level`,
+    rounds,
+    currentRoundIndex: 0,
+    roundScores: {},
+    allGraded: [],
+    webcamEnabled: setup.webcamEnabled || false,
+    aiVoiceEnabled: setup.aiVoiceEnabled !== false,
+    language: setup.language || "Python",
+    // working fields (reset per round by beginRound):
+    roundType: null, isCodingRound: false, roundCategoryLabel: "",
+    questions: [], currentQuestionIndex: 0, answers: [],
+    timeRemaining: 0, timerInterval: null, mcqTimerInterval: null,
+    hasInjectedFollowUp: false, mcqAnswered: false, _mcqOpts: null
+  };
+
+  showToast("Preparing your interview...", "info");
+  setTimeout(() => beginRound(0), 600);
+}
+
+function beginRound(i) {
+  const s = APP_STATE.currentInterview;
+  if (!s) return;
+  const type = s.rounds[i];
+  const role = getRole(s.roleId);
+  const rules = s.levelRules;
+  const count = type === "mcq" ? rules.mcqCount : type === "interview" ? rules.interviewCount : rules.codingCount;
+  const catLabel = roundCategoryLabel(type, role);
+
+  let qs = getRoundQuestions(s.roleId, s.level, type).slice(0, count);
+  qs = qs.map(q => ({ ...q, category: q.category || catLabel }));
+
+  s.currentRoundIndex = i;
+  s.roundType = type;
+  s.isCodingRound = (type === "coding" && role.hasCoding);
+  s.roundCategoryLabel = catLabel;
+  s.questions = qs;
+  s.currentQuestionIndex = 0;
+  s.answers = [];
+  s.hasInjectedFollowUp = false;
+  s.mcqAnswered = false;
+  if (type !== "mcq") {
+    s.timeRemaining = type === "interview" ? rules.interviewTimer : rules.codingTimer;
+  }
+  window.location.hash = "#/round";
+}
+
+function viewRound() {
+  const s = APP_STATE.currentInterview;
+  if (!s) { window.location.hash = "#/dashboard"; return; }
+  if (s.roundType === "mcq") return viewMCQRound();
+  return viewInterview();
+}
+
+function finishRound() {
+  const s = APP_STATE.currentInterview;
+  if (!s) return;
+  clearInterval(s.timerInterval);
+  if (s.mcqTimerInterval) clearInterval(s.mcqTimerInterval);
+  stopSpeaking();
+  stopActiveSpeechRecognition();
+  window.location.hash = "#/transition";
+}
+
+// Grade a list of interview/coding answers via the real Groq /api/evaluate.
+// No random fallback: an errored answer is flagged (evalError) and excluded from the round average.
+async function gradeAnswers(answers, isCoding, language, roundType) {
+  const out = [];
+  for (const ans of answers) {
+    if (ans.userAnswer === "[Question Skipped]") {
+      out.push({ question: ans.question, userAnswer: ans.userAnswer, score: 0,
+        strengths: [], improvements: ["Question skipped."], modelAnswer: ans.modelAnswer, complexity: null, roundType });
+      continue;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/evaluate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: ans.question, userAnswer: ans.userAnswer, modelAnswer: ans.modelAnswer,
+          category: isCoding ? "Coding Interview" : "Technical", language
+        })
+      });
+      if (!res.ok) throw new Error("evaluate " + res.status);
+      const g = await res.json();
+      out.push({ question: ans.question, userAnswer: ans.userAnswer, score: g.score,
+        strengths: g.strengths || [], improvements: g.improvements || [],
+        modelAnswer: g.modelAnswer || ans.modelAnswer, complexity: g.complexity || null,
+        feedback: g.feedback || "", roundType });
+    } catch (e) {
+      console.error("Evaluation failed:", e);
+      out.push({ question: ans.question, userAnswer: ans.userAnswer, score: 0,
+        strengths: [], improvements: ["AI evaluation unavailable — check the backend and GROQ_API_KEY."],
+        modelAnswer: ans.modelAnswer, complexity: null, roundType, evalError: true });
+    }
+  }
+  return out;
+}
+
+async function gradeRound(s, type) {
+  if (type === "mcq") {
+    const total = s.answers.length;
+    const correct = s.answers.filter(a => a.isCorrect).length;
+    s.answers.forEach(a => {
+      s.allGraded.push({
+        question: a.question, userAnswer: a.userAnswer, score: a.isCorrect ? 100 : 0,
+        strengths: a.isCorrect ? ["Correct answer"] : [],
+        improvements: a.isCorrect ? [] : ["Review: " + (a.explanation || "see explanation")],
+        modelAnswer: a.explanation || "", complexity: null, roundType: "mcq"
+      });
+    });
+    return { score: total ? Math.round((correct / total) * 100) : 0, correct, total };
+  }
+  const graded = await gradeAnswers(s.answers, s.isCodingRound, s.language, type);
+  graded.forEach(g => s.allGraded.push(g));
+  const scored = graded.filter(a => !a.evalError);
+  const score = scored.length ? Math.round(scored.reduce((x, a) => x + a.score, 0) / scored.length) : 0;
+  return { score };
+}
+
+function viewRoundTransition() {
+  const s = APP_STATE.currentInterview;
+  if (!s) { window.location.hash = "#/dashboard"; return; }
+  const idx = s.currentRoundIndex;
+  const type = s.rounds[idx];
+  const role = getRole(s.roleId);
+  const view = document.getElementById("app-view");
+
+  view.innerHTML = `<div class="transition-container"><div class="card transition-card">
+    <div class="spinner"></div>
+    <h2>Scoring ${roundCategoryLabel(type, role)}…</h2>
+    <p style="color:var(--text-muted);">Running AI evaluation on your answers.</p>
+  </div></div>`;
+  lucide.createIcons();
+
+  (async () => {
+    if (!s.roundScores[type]) {
+      try { s.roundScores[type] = await gradeRound(s, type); }
+      catch (e) { console.error("grade round failed", e); s.roundScores[type] = { score: 0 }; }
+    }
+    const rs = s.roundScores[type];
+    const nextIdx = idx + 1;
+    const hasNext = nextIdx < s.rounds.length;
+    const nextType = hasNext ? s.rounds[nextIdx] : null;
+    const scoreLine = type === "mcq" ? `${rs.score}% (${rs.correct}/${rs.total} correct)` : `${rs.score}%`;
+
+    view.innerHTML = `<div class="transition-container"><div class="card transition-card">
+      <span class="level-badge level-${s.levelRules.color}">${s.levelRules.label}</span>
+      <h2>${roundCategoryLabel(type, role)} Complete</h2>
+      <div class="transition-score">${scoreLine}</div>
+      ${hasNext ? `
+        <p class="transition-next">Next up: <strong>${roundCategoryLabel(nextType, role)}</strong></p>
+        <div class="transition-actions">
+          <button class="btn btn-primary" onclick="continueToNextRound()">Continue</button>
+          <button class="btn btn-secondary" onclick="finishEarly()">End &amp; See Results</button>
+        </div>` : `
+        <p class="transition-next">All rounds complete.</p>
+        <div class="transition-actions"><button class="btn btn-primary" onclick="finishEarly()">See Results</button></div>`}
+    </div></div>`;
+    lucide.createIcons();
+  })();
+}
+window.continueToNextRound = () => { const s = APP_STATE.currentInterview; if (s) beginRound(s.currentRoundIndex + 1); };
+window.finishEarly = () => { window.location.hash = "#/analysis"; };
+
+// =====================================================================
+// MCQ Round (Round 1)
+// =====================================================================
+function viewMCQRound() {
+  const s = APP_STATE.currentInterview;
+  const view = document.getElementById("app-view");
+  view.innerHTML = `
+    <div class="mcq-view">
+      <div class="card interview-header-card">
+        <div class="interview-header-left">
+          <h2>${s.roleName} — MCQ Round <span class="level-badge level-${s.levelRules.color}">${s.levelRules.label}</span></h2>
+          <div class="interview-progress-wrapper">
+            <span id="mcq-q-index">Question 1 of ${s.questions.length}</span>
+            <div class="interview-progress-bar"><div class="interview-progress-fill" id="mcq-progress" style="width:0%;"></div></div>
+          </div>
+        </div>
+        <div class="interview-header-right" style="display:flex; align-items:center; gap:12px;">
+          <div class="timer-box" id="mcq-timer-box" style="margin:0;"><i data-lucide="clock"></i> <span id="mcq-timer-text">--</span></div>
+          <button class="btn btn-secondary" onclick="triggerExitConfirm()" style="padding:8px 16px; font-size:14px;">Exit</button>
+        </div>
+      </div>
+      <div class="card mcq-card" id="mcq-card"></div>
+    </div>`;
+  lucide.createIcons();
+  renderMCQQuestion();
+}
+
+function renderMCQQuestion() {
+  const s = APP_STATE.currentInterview;
+  const idx = s.currentQuestionIndex;
+  const q = s.questions[idx];
+  const card = document.getElementById("mcq-card");
+  document.getElementById("mcq-q-index").innerText = `Question ${idx + 1} of ${s.questions.length}`;
+  document.getElementById("mcq-progress").style.width = `${(idx / s.questions.length) * 100}%`;
+
+  // Shuffle options at render time; track correctness by identity (not the frozen index).
+  const opts = q.options.map((text, i) => ({ text, correct: i === q.correct }));
+  for (let i = opts.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [opts[i], opts[j]] = [opts[j], opts[i]]; }
+  s._mcqOpts = opts;
+  s.mcqAnswered = false;
+
+  card.innerHTML = `
+    <h3 class="mcq-question">${q.text}</h3>
+    <div class="mcq-options" id="mcq-options">
+      ${opts.map((o, i) => `<button class="mcq-option" data-i="${i}" onclick="selectMCQOption(${i})">
+        <span class="mcq-option-letter">${String.fromCharCode(65 + i)}</span><span>${o.text}</span></button>`).join("")}
+    </div>
+    <div class="mcq-explanation hidden" id="mcq-explanation"></div>
+    <div class="mcq-footer">
+      <button class="btn btn-ghost" onclick="skipMCQ()">Skip</button>
+      <button class="btn btn-primary hidden" id="mcq-next-btn" onclick="nextMCQ()">Next</button>
+    </div>`;
+  lucide.createIcons();
+  startMCQTimer();
+}
+
+function startMCQTimer() {
+  const s = APP_STATE.currentInterview;
+  clearInterval(s.mcqTimerInterval);
+  let t = s.levelRules.mcqTimer;
+  const el = document.getElementById("mcq-timer-text");
+  if (el) el.innerText = t + "s";
+  s.mcqTimerInterval = setInterval(() => {
+    t--;
+    const e2 = document.getElementById("mcq-timer-text");
+    if (e2) e2.innerText = t + "s";
+    if (t <= 0) { clearInterval(s.mcqTimerInterval); if (!s.mcqAnswered) revealMCQ(-1); }
   }, 1000);
+}
+
+window.selectMCQOption = (i) => revealMCQ(i);
+window.skipMCQ = () => { if (!APP_STATE.currentInterview.mcqAnswered) revealMCQ(-1); };
+window.nextMCQ = () => {
+  const s = APP_STATE.currentInterview;
+  s.currentQuestionIndex++;
+  if (s.currentQuestionIndex < s.questions.length) renderMCQQuestion();
+  else finishRound();
+};
+
+function revealMCQ(chosenIdx) {
+  const s = APP_STATE.currentInterview;
+  if (s.mcqAnswered) return;
+  s.mcqAnswered = true;
+  clearInterval(s.mcqTimerInterval);
+  const q = s.questions[s.currentQuestionIndex];
+  const opts = s._mcqOpts;
+  const chosen = chosenIdx >= 0 ? opts[chosenIdx] : null;
+  const isCorrect = !!(chosen && chosen.correct);
+
+  document.querySelectorAll(".mcq-option").forEach((btn, i) => {
+    btn.disabled = true;
+    if (opts[i].correct) btn.classList.add("correct");
+    else if (i === chosenIdx) btn.classList.add("incorrect");
+  });
+  const exp = document.getElementById("mcq-explanation");
+  exp.classList.remove("hidden");
+  exp.innerHTML = `<strong>${isCorrect ? "✅ Correct" : chosenIdx < 0 ? "⏱ Time's up" : "❌ Incorrect"}</strong> — ${q.explanation || ""}`;
+  const nextBtn = document.getElementById("mcq-next-btn");
+  if (nextBtn) nextBtn.classList.remove("hidden");
+
+  s.answers.push({
+    question: q.text,
+    userAnswer: chosen ? chosen.text : "[No answer]",
+    isCorrect, explanation: q.explanation || "", roundType: "mcq"
+  });
 }
 
 // --- Live Interview View ---
@@ -1601,14 +2036,15 @@ function viewInterview() {
   }
   
   // Render structure
-  const isCoding = session.category === "Coding Interview";
-  
+  const isCoding = session.isCodingRound;
+  const roundLabel = session.roundCategoryLabel || "Interview";
+
   view.innerHTML = `
     <div class="interview-view">
       <!-- Top header with progress -->
       <div class="card interview-header-card">
         <div class="interview-header-left">
-          <h2 id="interview-session-title">${session.role} Interview</h2>
+          <h2 id="interview-session-title">${session.roleName} — ${roundLabel} <span class="level-badge level-${session.levelRules.color}">${session.levelRules.label}</span></h2>
           <div class="interview-progress-wrapper">
             <span id="interview-q-index">Question 1 of ${session.questions.length}</span>
             <div class="interview-progress-bar">
@@ -1806,8 +2242,8 @@ function viewInterview() {
     
     if (session.timeRemaining <= 0) {
       clearInterval(session.timerInterval);
-      showToast("Time's up! Generating analysis.", "warning");
-      finishInterview();
+      showToast("Time's up! Scoring this round.", "warning");
+      finishRound();
     }
   }, 1000);
   
@@ -1873,17 +2309,18 @@ function viewInterview() {
   // Character counter and Autosave
   const input = document.getElementById("interview-answer-input");
   const counter = document.getElementById("char-counter-text");
-  input.addEventListener("input", () => {
-    counter.innerText = `${input.value.length} / 2000 characters`;
-  });
-  
-  // Shortcuts
-  input.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.key === "Enter") {
-      e.preventDefault();
-      submitInterviewAnswer();
-    }
-  });
+  if (input) {
+    input.addEventListener("input", () => {
+      if (counter) counter.innerText = `${input.value.length} / 2000 characters`;
+    });
+    // Shortcuts
+    input.addEventListener("keydown", (e) => {
+      if (e.ctrlKey && e.key === "Enter") {
+        e.preventDefault();
+        submitInterviewAnswer();
+      }
+    });
+  }
   
   lucide.createIcons();
 }
@@ -2005,7 +2442,7 @@ function updateEditorLineNumbers() {
 function loadInterviewQuestion() {
   const session = APP_STATE.currentInterview;
   const q = session.questions[session.currentQuestionIndex];
-  const isCoding = session.category === "Coding Interview";
+  const isCoding = session.isCodingRound;
   
   // Progress fill
   const percent = (session.currentQuestionIndex / session.questions.length) * 100;
@@ -2140,8 +2577,11 @@ function getLocalFollowUp(questionText, userAnswer, category) {
 async function checkAndInjectFollowUp(userAnswer) {
   const session = APP_STATE.currentInterview;
   if (!session) return;
-  
-  // Only allow at most 1 follow-up question per session to keep duration balanced.
+
+  // Adaptive follow-ups only make sense in the Live Interview round.
+  if (session.roundType !== "interview") return;
+
+  // Only allow at most 1 follow-up question per round to keep duration balanced.
   if (session.hasInjectedFollowUp) return;
   
   const q = session.questions[session.currentQuestionIndex];
@@ -2229,9 +2669,9 @@ function nextInterviewStep() {
   if (session.currentQuestionIndex < session.questions.length) {
     loadInterviewQuestion();
   } else {
-    // End interview
+    // End of this round → grade + transition (or final analysis if last round)
     clearInterval(session.timerInterval);
-    finishInterview();
+    finishRound();
   }
 }
 
@@ -2382,113 +2822,80 @@ function setTimelineStepCompleted(id) {
   }
 }
 
+// Cosmetic skill matrix for the radar chart, derived from the overall score
+// (not an "AI" claim — just a visual breakdown).
+function deriveSkills(base) {
+  const c = v => Math.max(0, Math.min(100, v));
+  return {
+    technical: c(base + 2), communication: c(base - 3), problemSolving: c(base + 1),
+    confidence: c(base - 2), clarity: c(base)
+  };
+}
+
 async function generateFinalAnalysisReport() {
   const session = APP_STATE.currentInterview;
   if (!session) return;
-  
+
   showToast("Compiling AI feedback report...", "info");
-  
-  let scoresSum = 0;
-  const evaluationPromises = session.answers.map(async (ans) => {
-    if (ans.userAnswer === "[Question Skipped]") {
-      return {
-        ...ans,
-        score: 0,
-        strengths: ["None (Question Skipped)"],
-        improvements: ["Ensure you attempt all questions. Even partial definitions build score."]
-      };
-    }
-    try {
-      const res = await fetch(`${API_BASE}/evaluate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: ans.question,
-          userAnswer: ans.userAnswer,
-          modelAnswer: ans.modelAnswer,
-          category: session.category
-        })
-      });
-      if (res.ok) {
-        const graded = await res.json();
-        return {
-          ...ans,
-          score: graded.score,
-          strengths: graded.strengths,
-          improvements: graded.improvements,
-          modelAnswer: graded.modelAnswer,
-          complexity: graded.complexity
-        };
-      }
-    } catch (e) {
-      console.error("Backend evaluation failed, falling back to local simulation", e);
-    }
-    
-    // Fallback simulation
-    const len = ans.userAnswer.length;
-    let score = 0;
-    let strengths = [];
-    let improvements = [];
-    if (len > 150) {
-      score = Math.floor(Math.random() * 15) + 81;
-      strengths = ["Strong comprehensive depth shown", "Good structuring of components"];
-      improvements = ["Could optimize syntax details", "Explain alternative design options"];
-    } else {
-      score = Math.floor(Math.random() * 20) + 60;
-      strengths = ["Understanding of core terms present"];
-      improvements = ["Elaborate with practical examples", "Provide detailed breakdown of underlying mechanics"];
-    }
-    return {
-      ...ans,
-      score,
-      strengths,
-      improvements
-    };
-  });
-  
-  const reportAnswers = await Promise.all(evaluationPromises);
-  reportAnswers.forEach(ans => {
-    scoresSum += ans.score;
-  });
-  
-  const finalScore = Math.round(scoresSum / session.questions.length);
+
+  // Rounds were already graded on their transition screens → aggregate here.
+  const graded = session.allGraded || [];
+  const roundScores = session.roundScores || {};
+
+  // Overall = mean of completed (non-skipped) round scores.
+  const completed = Object.entries(roundScores).filter(([, v]) => !v.skipped);
+  const overall = completed.length
+    ? Math.round(completed.reduce((s, [, v]) => s + v.score, 0) / completed.length)
+    : 0;
+
+  // Weakest question texts feed the recommendation prompt.
+  const weakAreas = [...graded].filter(a => a.score < 70).sort((a, b) => a.score - b.score).slice(0, 3).map(a => a.question);
+
+  // Real level-aware recommendations via Groq (no static score×level table).
+  let recommendations = null;
+  try {
+    const res = await fetch(`${API_BASE}/recommend`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: session.roleName, level: session.level, overallScore: overall, roundScores, weakAreas })
+    });
+    if (res.ok) recommendations = await res.json();
+    else console.error("recommend endpoint returned", res.status);
+  } catch (e) {
+    console.error("Recommendation request failed", e);
+  }
+
   const reportId = "int-" + Math.floor(Math.random() * 900 + 100);
-  
   const newReport = {
     id: reportId,
-    role: session.role,
+    role: session.roleName,
+    roleId: session.roleId,
     category: session.category,
     difficulty: session.difficulty,
+    mode: session.mode,
+    level: session.level,
     date: new Date().toISOString().split('T')[0],
-    duration: session.duration,
-    score: finalScore,
-    answers: reportAnswers,
-    skills: {
-      technical: finalScore + Math.floor(Math.random() * 8 - 4),
-      communication: finalScore + Math.floor(Math.random() * 10 - 5),
-      problemSolving: finalScore + Math.floor(Math.random() * 6 - 3),
-      confidence: finalScore + Math.floor(Math.random() * 12 - 6),
-      clarity: finalScore + Math.floor(Math.random() * 8 - 4)
-    }
+    duration: session.durationLabel || "",
+    score: overall,
+    roundScores,
+    recommendations,
+    answers: graded,
+    skills: deriveSkills(overall)
   };
-  
-  // Post report to backend
+
+  // Persist to backend (mode, level, roundScores, per-answer roundType included).
   try {
     await fetch(`${API_BASE}/history`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(newReport)
     });
   } catch (err) {
     console.error("Failed to log session to server", err);
   }
-  
-  // Update state & storage cache
+
   APP_STATE.history.unshift(newReport);
   APP_STATE.currentInterview = null;
   saveStateToStorage();
-  
-  // Route to results
+
   window.location.hash = `#/results?id=${reportId}`;
   showToast("Analysis report compiled successfully!");
 }
@@ -2533,6 +2940,7 @@ function viewResults() {
           </div>
           <span class="badge ${scoreClass}" style="margin-bottom:12px; padding:6px 14px;">${scoreLabel}</span>
           <h3 style="font-size:20px; margin-bottom:8px;">${report.role} Report</h3>
+          ${report.level ? `<span class="level-badge level-${(LEVEL_RULES[report.level] || {}).color || 'green'}" style="margin-bottom:8px;">${(LEVEL_RULES[report.level] || {}).label || report.level}</span>` : ''}
           <p style="color:var(--text-muted); font-size:14px;">Date: ${report.date} | Duration: ${report.duration}</p>
         </div>
         
@@ -2544,7 +2952,38 @@ function viewResults() {
           </div>
         </div>
       </div>
-      
+
+      ${report.roundScores ? `
+      <div class="card">
+        <h3 style="font-size:18px; margin-bottom:16px;">Per-Round Scores</h3>
+        <div class="round-score-grid">
+          ${["mcq", "interview", "coding"].filter(rt => report.roundScores[rt]).map(rt => {
+            const v = report.roundScores[rt];
+            const label = rt === 'mcq' ? 'MCQ' : rt === 'interview' ? 'Live Interview' : 'Coding / Case Study';
+            const detail = v.skipped ? 'Skipped' : (rt === 'mcq' && v.total != null ? `${v.correct}/${v.total} correct` : '');
+            return `<div class="round-score-card">
+              <span class="round-score-label">${label}</span>
+              <span class="round-score-value">${v.skipped ? '—' : v.score + '%'}</span>
+              <span class="round-score-detail">${detail}</span>
+            </div>`;
+          }).join("")}
+        </div>
+      </div>` : ''}
+
+      ${report.recommendations ? `
+      <div class="card ai-coach-card">
+        <h3 style="font-size:18px; margin-bottom:16px;"><i data-lucide="sparkles" style="width:18px;height:18px;vertical-align:middle;"></i> AI Coach</h3>
+        ${report.recommendations.levelAdvice ? `<p class="coach-advice">${report.recommendations.levelAdvice}</p>` : ''}
+        <div class="grid-2">
+          <div><div class="feedback-section-title" style="color:var(--success);">Strengths</div>
+            <ul class="feedback-bullets">${(report.recommendations.strengths || []).map(x => `<li class="strength">${x}</li>`).join('')}</ul></div>
+          <div><div class="feedback-section-title" style="color:var(--warning);">Focus Areas</div>
+            <ul class="feedback-bullets">${(report.recommendations.focusAreas || []).map(x => `<li class="improvement">${x}</li>`).join('')}</ul></div>
+        </div>
+        ${report.recommendations.nextSteps ? `<div class="feedback-section-title" style="color:var(--primary);">Next Steps</div><p style="font-size:14px;color:var(--text-muted);">${report.recommendations.nextSteps}</p>` : ''}
+      </div>` : `
+      <div class="card"><p style="color:var(--text-muted);">AI coach recommendations unavailable — check the backend and GROQ_API_KEY.</p></div>`}
+
       <!-- Detailed answers breakdown -->
       <div class="card">
         <h3 style="font-size:18px; margin-bottom:20px;">Question-by-Question Evaluation</h3>
@@ -2568,10 +3007,11 @@ function viewResults() {
                 <div class="user-answer-box" style="font-family:monospace; white-space:pre-wrap; background-color:#0F172A; color:#E2E8F0; padding:12px; border-radius:var(--radius-sm);">${ans.userAnswer}</div>
                 
                 ${ans.complexity ? `
-                  <div class="feedback-section-title" style="color:var(--accent);">Complexity Heuristics:</div>
+                  <div class="feedback-section-title" style="color:var(--accent);">Complexity:</div>
                   <div class="complexity-badge-row" style="margin-bottom:16px;">
-                    <span class="complexity-badge">Time Complexity: ${ans.complexity.time}</span>
-                    <span class="complexity-badge space">Space Complexity: ${ans.complexity.space}</span>
+                    ${typeof ans.complexity === 'string'
+                      ? `<span class="complexity-badge">${ans.complexity}</span>`
+                      : `<span class="complexity-badge">Time: ${ans.complexity.time}</span><span class="complexity-badge space">Space: ${ans.complexity.space}</span>`}
                   </div>
                 ` : ''}
                 
@@ -2579,13 +3019,13 @@ function viewResults() {
                   <div>
                     <div class="feedback-section-title" style="color:var(--success);"><i data-lucide="check-circle" style="width:14px; height:14px; vertical-align:middle;"></i> Strengths:</div>
                     <ul class="feedback-bullets">
-                      ${ans.strengths.map(s => `<li class="strength">${s}</li>`).join('')}
+                      ${(ans.strengths || []).map(s => `<li class="strength">${s}</li>`).join('')}
                     </ul>
                   </div>
                   <div>
                     <div class="feedback-section-title" style="color:var(--warning);"><i data-lucide="help-circle" style="width:14px; height:14px; vertical-align:middle;"></i> Suggestions:</div>
                     <ul class="feedback-bullets">
-                      ${ans.improvements.map(i => `<li class="improvement">${i}</li>`).join('')}
+                      ${(ans.improvements || []).map(i => `<li class="improvement">${i}</li>`).join('')}
                     </ul>
                   </div>
                 </div>
@@ -2731,7 +3171,9 @@ function viewHistory() {
             <tr>
               <th>Date</th>
               <th>Job Role</th>
+              <th>Level</th>
               <th>Category</th>
+              <th>Rounds</th>
               <th>Duration</th>
               <th>Score</th>
               <th>Report Action</th>
@@ -2744,22 +3186,46 @@ function viewHistory() {
       </div>
     </div>
   `;
-  
+
   const tbody = document.getElementById("history-rows-tbody");
   if (APP_STATE.history.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-light);">No records found. Setup a mock to start history.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-light);">No records found. Setup a mock to start history.</td></tr>`;
   } else {
     tbody.innerHTML = APP_STATE.history.map(h => `
       <tr>
         <td><strong>${h.date}</strong></td>
         <td>${h.role}</td>
+        <td>${levelBadgeHtml(h.level)}</td>
         <td><span class="badge ${h.category.includes('HR') ? 'badge-purple' : 'badge-primary'}">${h.category}</span></td>
+        <td>${roundPillsHtml(h.roundScores)}</td>
         <td>${h.duration}</td>
         <td><strong style="color: ${h.score >= 80 ? 'var(--success)' : h.score >= 70 ? 'var(--warning)' : 'var(--error)'}">${h.score}%</strong></td>
         <td><a href="#/results?id=${h.id}" class="btn btn-secondary" style="padding: 6px 12px; font-size:13px;">View Detailed Feedback</a></td>
       </tr>
     `).join('');
   }
+}
+
+// Level pill for history/analytics — reads persisted h.level via LEVEL_RULES.
+function levelBadgeHtml(level) {
+  const r = LEVEL_RULES[level];
+  if (!r) return `<span class="badge badge-primary">—</span>`;
+  return `<span class="level-badge level-${r.color}">${r.label}</span>`;
+}
+
+// Per-round score pills (MCQ / INT / CODE) from persisted roundScores JSON.
+function roundPillsHtml(roundScores) {
+  if (!roundScores) return `<span style="color:var(--text-light); font-size:12px;">—</span>`;
+  const labels = { mcq: "MCQ", interview: "INT", coding: "CODE" };
+  const pills = ["mcq", "interview", "coding"]
+    .filter(rt => roundScores[rt])
+    .map(rt => {
+      const v = roundScores[rt];
+      if (v.skipped) return `<span class="round-pill round-pill-skip">${labels[rt]}: —</span>`;
+      const cls = v.score >= 80 ? "round-pill-good" : v.score >= 60 ? "round-pill-mid" : "round-pill-low";
+      return `<span class="round-pill ${cls}">${labels[rt]}: ${v.score}%</span>`;
+    });
+  return pills.length ? `<div class="round-pills">${pills.join("")}</div>` : `<span style="color:var(--text-light); font-size:12px;">—</span>`;
 }
 
 // --- Analytics View ---
@@ -2792,43 +3258,251 @@ function viewAnalytics() {
       </div>
       
       <div class="grid-2">
-        <!-- Progress Growth Line Chart -->
+        <!-- Chart 1: Performance by Role -->
         <div class="card" style="min-height: 320px;">
-          <h3 style="font-size:16px; margin-bottom:20px;">Scores Trend Analysis</h3>
+          <h3 style="font-size:16px; margin-bottom:20px;">Performance by Role — average score</h3>
           <div class="chart-container" style="height:240px;">
-            <canvas id="analytics-growth-chart-full"></canvas>
+            <canvas id="analytics-role-chart"></canvas>
           </div>
         </div>
-        
-        <!-- Category strengths radar -->
-        <div class="card" style="display:flex; flex-direction:column; align-items:center;">
-          <h3 style="font-size:16px; margin-bottom:20px; align-self:flex-start;">Competency Areas Strength Matrix</h3>
-          <div class="chart-container" style="display:flex; justify-content:center; align-items:center; height:240px;">
-            <svg id="analytics-radar-chart-full" width="220" height="220" style="overflow: visible;"></svg>
+
+        <!-- Chart 2: Level Progression -->
+        <div class="card" style="min-height: 320px;">
+          <h3 style="font-size:16px; margin-bottom:20px;">Level Progression — Easy → Medium → Advanced</h3>
+          <div class="chart-container" style="height:240px;">
+            <canvas id="analytics-level-chart"></canvas>
           </div>
+        </div>
+
+        <!-- Chart 3: Round Comparison -->
+        <div class="card" style="min-height: 320px;">
+          <h3 style="font-size:16px; margin-bottom:6px;">Round Comparison — MCQ vs Interview vs Coding</h3>
+          <div class="chart-legend">
+            <span><i style="background:var(--primary)"></i>MCQ</span>
+            <span><i style="background:var(--success)"></i>Interview</span>
+            <span><i style="background:var(--warning)"></i>Coding</span>
+          </div>
+          <div class="chart-container" style="height:220px;">
+            <canvas id="analytics-round-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 4: Focus Areas heatmap (round × level) -->
+        <div class="card" style="min-height: 320px;">
+          <h3 style="font-size:16px; margin-bottom:6px;">AI Focus Areas — lowest scores need the most work</h3>
+          <p class="chart-note">Round × level averages from your real results. Per-topic granularity needs question-level topic tagging, which isn't persisted yet.</p>
+          <div id="analytics-focus-heatmap"></div>
         </div>
       </div>
     </div>
   `;
-  
-  // Render charts
+
+  // Render charts (deferred so canvases have layout dimensions).
   setTimeout(() => {
-    drawGrowthChart("analytics-growth-chart-full");
-    
-    // Average skill levels for radar
-    let avgSkills = { technical: 75, communication: 70, problemSolving: 80, confidence: 75, clarity: 72 };
-    if (APP_STATE.history.length > 0) {
-      avgSkills = {
-        technical: Math.round(APP_STATE.history.reduce((a, b) => a + b.skills.technical, 0) / totalCompleted),
-        communication: Math.round(APP_STATE.history.reduce((a, b) => a + b.skills.communication, 0) / totalCompleted),
-        problemSolving: Math.round(APP_STATE.history.reduce((a, b) => a + b.skills.problemSolving, 0) / totalCompleted),
-        confidence: Math.round(APP_STATE.history.reduce((a, b) => a + b.skills.confidence, 0) / totalCompleted),
-        clarity: Math.round(APP_STATE.history.reduce((a, b) => a + b.skills.clarity, 0) / totalCompleted)
-      };
-    }
-    drawRadarChart("analytics-radar-chart-full", avgSkills);
+    drawRolePerformanceChart("analytics-role-chart");
+    drawLevelProgressionChart("analytics-level-chart");
+    drawRoundComparisonChart("analytics-round-chart");
+    renderFocusHeatmap("analytics-focus-heatmap");
   }, 100);
 }
+
+// Score → color ramp shared by analytics (low score = needs work = red).
+function scoreColor(score) {
+  if (score == null) return "var(--surface-border)";
+  if (score >= 80) return "var(--success)";
+  if (score >= 60) return "var(--warning)";
+  return "var(--error)";
+}
+
+// Generic vertical bar chart on a 2D canvas (matches drawGrowthChart styling).
+function drawBarChart(canvasId, items) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!items.length) { drawEmptyChart(ctx, w, h); return; }
+
+  const padL = 34, padB = 42, padT = 10;
+  const gw = w - padL - 12, gh = h - padB - padT;
+
+  ctx.strokeStyle = "#F1F5F9"; ctx.lineWidth = 1;
+  ctx.fillStyle = "#94A3B8"; ctx.font = "10px sans-serif"; ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const val = 100 - i * 25;
+    const y = padT + gh * (i / 4);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - 12, y); ctx.stroke();
+    ctx.fillText(val, padL - 6, y + 3);
+  }
+
+  const slot = gw / items.length;
+  const bw = Math.min(48, slot * 0.6);
+  items.forEach((it, i) => {
+    const x = padL + slot * i + (slot - bw) / 2;
+    const bh = gh * (it.value / 100);
+    const y = padT + gh - bh;
+    ctx.fillStyle = resolveColor(it.color);
+    roundRect(ctx, x, y, bw, bh, 4); ctx.fill();
+    ctx.fillStyle = "#334155"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(it.value + "%", x + bw / 2, y - 4);
+    ctx.fillStyle = "#64748B"; ctx.font = "10px sans-serif";
+    ctx.fillText(truncLabel(it.label), x + bw / 2, padT + gh + 14);
+  });
+}
+
+// Multi-line trend chart (one line per series).
+function drawLineSeriesChart(canvasId, series, xCount) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!xCount) { drawEmptyChart(ctx, w, h); return; }
+
+  const padL = 34, padB = 20, padT = 10;
+  const gw = w - padL - 12, gh = h - padB - padT;
+
+  ctx.strokeStyle = "#F1F5F9"; ctx.lineWidth = 1;
+  ctx.fillStyle = "#94A3B8"; ctx.font = "10px sans-serif"; ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + gh * (i / 4);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - 12, y); ctx.stroke();
+    ctx.fillText(100 - i * 25, padL - 6, y + 3);
+  }
+
+  const xAt = (i) => padL + (xCount > 1 ? gw * (i / (xCount - 1)) : gw / 2);
+  const yAt = (v) => padT + gh - gh * (v / 100);
+
+  series.forEach(s => {
+    const color = resolveColor(s.color);
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    let started = false;
+    s.points.forEach((p, i) => {
+      if (p == null) return;
+      const x = xAt(i), y = yAt(p);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.fillStyle = color;
+    s.points.forEach((p, i) => {
+      if (p == null) return;
+      ctx.beginPath(); ctx.arc(xAt(i), yAt(p), 3, 0, Math.PI * 2); ctx.fill();
+    });
+  });
+}
+
+// Chart 1 — average score per role across all sessions.
+function drawRolePerformanceChart(canvasId) {
+  const byRole = {};
+  APP_STATE.history.forEach(h => {
+    (byRole[h.role] = byRole[h.role] || []).push(h.score);
+  });
+  const items = Object.entries(byRole).map(([label, scores]) => ({
+    label, value: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length), color: "var(--primary)"
+  }));
+  drawBarChart(canvasId, items);
+}
+
+// Chart 2 — average score per difficulty level (green/amber/red bars).
+function drawLevelProgressionChart(canvasId) {
+  const order = ["easy", "medium", "advanced"];
+  const byLevel = {};
+  APP_STATE.history.forEach(h => {
+    const lv = h.level || "easy";
+    (byLevel[lv] = byLevel[lv] || []).push(h.score);
+  });
+  const items = order.filter(lv => byLevel[lv]).map(lv => ({
+    label: (LEVEL_RULES[lv] || {}).label || lv,
+    value: Math.round(byLevel[lv].reduce((a, b) => a + b, 0) / byLevel[lv].length),
+    color: `var(--${(LEVEL_RULES[lv] || {}).color === 'green' ? 'success' : (LEVEL_RULES[lv] || {}).color === 'amber' ? 'warning' : 'error'})`
+  }));
+  drawBarChart(canvasId, items);
+}
+
+// Chart 3 — MCQ / Interview / Coding score trend across sessions (chronological).
+function drawRoundComparisonChart(canvasId) {
+  const chrono = [...APP_STATE.history].reverse().filter(h => h.roundScores);
+  const pick = (h, rt) => (h.roundScores[rt] && !h.roundScores[rt].skipped) ? h.roundScores[rt].score : null;
+  const series = [
+    { color: "var(--primary)", points: chrono.map(h => pick(h, "mcq")) },
+    { color: "var(--success)", points: chrono.map(h => pick(h, "interview")) },
+    { color: "var(--warning)", points: chrono.map(h => pick(h, "coding")) }
+  ];
+  drawLineSeriesChart(canvasId, series, chrono.length);
+}
+
+// Chart 4 — round × level average heatmap (real roundScores; lower = needs work).
+function renderFocusHeatmap(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const levels = ["easy", "medium", "advanced"];
+  const rounds = [["mcq", "MCQ"], ["interview", "Interview"], ["coding", "Coding"]];
+  const bucket = {}; // key `${level}|${round}` -> [scores]
+  APP_STATE.history.forEach(h => {
+    if (!h.roundScores) return;
+    const lv = h.level || "easy";
+    rounds.forEach(([rt]) => {
+      const v = h.roundScores[rt];
+      if (v && !v.skipped) (bucket[`${lv}|${rt}`] = bucket[`${lv}|${rt}`] || []).push(v.score);
+    });
+  });
+
+  if (!Object.keys(bucket).length) {
+    el.innerHTML = `<p class="chart-empty">No round data yet. Complete a full interview to populate this heatmap.</p>`;
+    return;
+  }
+
+  const avg = (arr) => arr && arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
+  let html = `<table class="focus-heatmap"><thead><tr><th></th>`;
+  levels.forEach(lv => { html += `<th>${(LEVEL_RULES[lv] || {}).label || lv}</th>`; });
+  html += `</tr></thead><tbody>`;
+  rounds.forEach(([rt, rlabel]) => {
+    html += `<tr><td class="focus-row-label">${rlabel}</td>`;
+    levels.forEach(lv => {
+      const score = avg(bucket[`${lv}|${rt}`]);
+      html += score == null
+        ? `<td class="focus-cell focus-empty">—</td>`
+        : `<td class="focus-cell" style="background:${scoreColor(score)}">${score}%</td>`;
+    });
+    html += `</tr>`;
+  });
+  html += `</tbody></table>`;
+  el.innerHTML = html;
+}
+
+// --- small canvas helpers ---
+function drawEmptyChart(ctx, w, h) {
+  ctx.fillStyle = "#94A3B8"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("Not enough data yet", w / 2, h / 2);
+}
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function cssVarName(v) { const m = /var\((--[\w-]+)\)/.exec(v || ""); return m ? m[1] : ""; }
+function resolveColor(v) {
+  const name = cssVarName(v);
+  if (name) {
+    const c = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    if (c) return c;
+  }
+  return v || "#4f46e5";
+}
+function truncLabel(s) { return s && s.length > 12 ? s.slice(0, 11) + "…" : s; }
 
 // --- Profile View ---
 function viewProfile() {

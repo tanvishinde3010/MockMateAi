@@ -3835,3 +3835,168 @@ body.dark-theme .dropdown-item:hover {
     display: none !important;
   }
 }
+
+/* =====================================================================
+   3-Round Simulator — setup wizard, MCQ, transitions, results additions
+   ===================================================================== */
+
+.setup-step-title { font-size: 18px; margin-bottom: 20px; }
+
+/* Mode selection */
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.mode-card {
+  position: relative; border: 2px solid var(--surface-border); border-radius: var(--radius-md);
+  padding: 20px; cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.mode-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.mode-card.selected { border-color: var(--primary); background: var(--primary-light); }
+.mode-card h4 { margin: 10px 0 6px; font-size: 16px; }
+.mode-card p { font-size: 13px; color: var(--text-muted); }
+.quick-round-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.round-chip {
+  padding: 8px 16px; border-radius: var(--radius-pill); border: 1px solid var(--surface-border);
+  background: var(--surface); cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-muted);
+}
+.round-chip.selected { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* Role grid */
+.role-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.role-card {
+  position: relative; border: 2px solid var(--surface-border); border-radius: var(--radius-md);
+  padding: 16px 12px; text-align: center; cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.role-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.role-card.selected { border-color: var(--primary); background: var(--primary-light); }
+.role-card-icon { display: flex; justify-content: center; margin-bottom: 8px; color: var(--primary); }
+.role-card h4 { font-size: 13px; margin-bottom: 6px; line-height: 1.25; }
+.role-card-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-light); }
+.role-card .selected-check { position: absolute; top: 8px; right: 8px; opacity: 0; color: var(--primary); }
+.role-card.selected .selected-check { opacity: 1; }
+.role-grid-note { font-size: 12px; color: var(--text-light); margin-top: 12px; }
+
+/* Level selector */
+.level-list { display: flex; flex-direction: column; gap: 14px; }
+.level-card {
+  border: 2px solid var(--surface-border); border-left-width: 6px; border-radius: var(--radius-md);
+  padding: 16px; cursor: pointer; transition: transform .15s, box-shadow .15s;
+}
+.level-card:hover { transform: translateX(3px); box-shadow: var(--shadow-md); }
+.level-card.selected { box-shadow: var(--shadow-md); }
+.level-card.level-green { border-left-color: var(--success); }
+.level-card.level-amber { border-left-color: var(--warning); }
+.level-card.level-red { border-left-color: var(--error); }
+.level-card.selected.level-green { background: var(--success-light); }
+.level-card.selected.level-amber { background: var(--warning-light); }
+.level-card.selected.level-red { background: var(--error-light); }
+.level-card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.level-card-tag { font-size: 12px; color: var(--text-muted); }
+.level-card-topics { font-size: 13px; color: var(--text-main); margin-bottom: 8px; }
+.level-card-meta { font-size: 12px; color: var(--text-light); }
+
+/* Level badge pill */
+.level-badge {
+  display: inline-block; padding: 3px 12px; border-radius: var(--radius-pill);
+  font-size: 12px; font-weight: 600; color: #fff;
+}
+.level-badge.level-green { background: var(--success); }
+.level-badge.level-amber { background: var(--warning); }
+.level-badge.level-red { background: var(--error); }
+
+/* Confirm rows */
+.confirm-row {
+  display: flex; justify-content: space-between; border-bottom: 1px solid var(--surface-border);
+  padding: 10px 0; font-size: 14px;
+}
+.confirm-row span { color: var(--text-muted); }
+
+/* MCQ round */
+.mcq-view { display: flex; flex-direction: column; gap: 16px; max-width: 860px; margin: 0 auto; }
+.mcq-card { padding: 28px; }
+.mcq-question { font-size: 20px; font-weight: 600; margin-bottom: 22px; line-height: 1.4; }
+.mcq-options { display: flex; flex-direction: column; gap: 12px; }
+.mcq-option {
+  display: flex; align-items: center; gap: 14px; text-align: left; width: 100%;
+  padding: 14px 18px; border: 2px solid var(--surface-border); border-radius: var(--radius-md);
+  background: var(--surface); cursor: pointer; font-size: 15px; color: var(--text-main);
+  transition: border-color .15s, background .15s;
+}
+.mcq-option:hover:not(:disabled) { border-color: var(--primary); }
+.mcq-option:disabled { cursor: default; }
+.mcq-option-letter {
+  display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  border-radius: 50%; background: var(--primary-light); color: var(--primary); font-weight: 700; flex-shrink: 0;
+}
+.mcq-option.correct { border-color: var(--success); background: var(--success-light); }
+.mcq-option.incorrect { border-color: var(--error); background: var(--error-light); }
+.mcq-explanation {
+  margin-top: 18px; padding: 14px 16px; border-radius: var(--radius-sm);
+  background: var(--info-light); font-size: 14px; line-height: 1.5;
+}
+.mcq-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; }
+
+/* Round transition */
+.transition-container { display: flex; justify-content: center; align-items: center; min-height: 70vh; }
+.transition-card { text-align: center; max-width: 460px; padding: 40px; }
+.transition-card h2 { margin: 16px 0 8px; font-size: 22px; }
+.transition-score { font-size: 46px; font-weight: 800; color: var(--primary); margin: 12px 0; }
+.transition-next { color: var(--text-muted); margin-bottom: 22px; }
+.transition-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+/* Results — per-round scores + AI coach */
+.round-score-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+.round-score-card {
+  display: flex; flex-direction: column; gap: 4px; padding: 16px; border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border); background: var(--bg);
+}
+.round-score-label { font-size: 13px; color: var(--text-muted); }
+.round-score-value { font-size: 28px; font-weight: 800; color: var(--primary); }
+.round-score-detail { font-size: 12px; color: var(--text-light); }
+/* Gradient-bordered AI panel (plan: "gradient panels") */
+.ai-coach-card {
+  border: 2px solid transparent;
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    linear-gradient(135deg, var(--primary), var(--accent)) border-box;
+}
+.coach-advice {
+  font-size: 15px; font-weight: 500; padding: 12px 16px; border-radius: var(--radius-sm);
+  background: var(--accent-light); margin-bottom: 16px;
+}
+
+/* History — per-round pills */
+.round-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+.round-pill {
+  font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.round-pill-good { background: var(--success-light); color: var(--success); }
+.round-pill-mid  { background: var(--warning-light); color: var(--warning); }
+.round-pill-low  { background: var(--error-light);   color: var(--error); }
+.round-pill-skip { background: var(--surface-border); color: var(--text-light); }
+
+/* Analytics — chart chrome */
+.chart-legend { display: flex; gap: 16px; margin-bottom: 10px; font-size: 12px; color: var(--text-muted); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.chart-note { font-size: 12px; color: var(--text-light); margin-bottom: 14px; line-height: 1.45; }
+.chart-empty { font-size: 13px; color: var(--text-light); padding: 40px 8px; text-align: center; }
+
+/* Analytics — focus heatmap */
+.focus-heatmap { width: 100%; border-collapse: separate; border-spacing: 6px; }
+.focus-heatmap th {
+  font-size: 12px; font-weight: 600; color: var(--text-muted); text-align: center; padding-bottom: 4px;
+}
+.focus-row-label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-align: left; padding-right: 8px; }
+.focus-cell {
+  text-align: center; color: #fff; font-weight: 700; font-size: 13px;
+  padding: 16px 8px; border-radius: var(--radius-sm); min-width: 64px;
+}
+.focus-empty { background: var(--surface-border); color: var(--text-light); font-weight: 500; }
+
+/* Responsive */
+@media (max-width: 720px) {
+  .role-grid { grid-template-columns: repeat(2, 1fr); }
+  .mode-grid { grid-template-columns: 1fr; }
+  .mcq-option { font-size: 14px; }
+}

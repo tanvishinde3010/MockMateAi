@@ -22,16 +22,19 @@ model User {
 }
 
 model InterviewSession {
-  id         String           @id
-  role       String
-  category   String
-  difficulty String
-  date       String
-  duration   String
-  score      Int
-  skills     String           // JSON stringified skills breakdown
-  answers    QuestionAnswer[]
-  createdAt  DateTime         @default(now())
+  id          String           @id
+  role        String
+  category    String
+  difficulty  String
+  date        String
+  duration    String
+  score       Int
+  skills      String           // JSON stringified skills breakdown
+  mode        String           @default("full")   // "full" | "quick"
+  level       String           @default("easy")   // "easy" | "medium" | "advanced"
+  roundScores String?          // JSON stringified per-round scores { mcq, interview, coding }
+  answers     QuestionAnswer[]
+  createdAt   DateTime         @default(now())
 }
 
 model QuestionAnswer {
@@ -43,6 +46,7 @@ model QuestionAnswer {
   improvements String           // JSON stringified array of improvements
   modelAnswer  String
   complexity   String?          // JSON stringified Big-O complexity {time, space}
+  roundType    String?          // "mcq" | "interview" | "coding"
   sessionId    String
   session      InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
