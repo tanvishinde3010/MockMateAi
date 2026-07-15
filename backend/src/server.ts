@@ -9,6 +9,59 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// ==========================================
+// LLM Config (Groq — OpenAI-compatible API)
+// ==========================================
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+
+// Call Groq chat completion and return the assistant message content as parsed JSON.
+// Throws on missing key, HTTP error, empty content, or unparseable JSON.
+async function callGroqJSON(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<any> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    throw new Error('GROQ_API_KEY not configured');
+  }
+
+  const resp = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ]
+    })
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(`Groq API error ${resp.status}: ${detail.slice(0, 300)}`);
+  }
+
+  const data: any = await resp.json();
+  const content: string | undefined = data?.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('Groq API returned empty content');
+  }
+
+  // Strip ```json ... ``` fences if present, then parse.
+  const cleaned = content
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+
+  return JSON.parse(cleaned);
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -205,6 +258,7 @@ app.get('/api/history', async (req: Request, res: Response) => {
     const formatted = sessions.map(s => ({
       ...s,
       skills: JSON.parse(s.skills),
+      roundScores: s.roundScores ? JSON.parse(s.roundScores) : null,
       answers: s.answers.map(a => ({
         ...a,
         strengths: JSON.parse(a.strengths),
@@ -221,8 +275,8 @@ app.get('/api/history', async (req: Request, res: Response) => {
 
 app.post('/api/history', async (req: Request, res: Response) => {
   try {
-    const { id, role, category, difficulty, duration, score, skills, answers } = req.body;
-    
+    const { id, role, category, difficulty, duration, score, skills, answers, mode, level, roundScores } = req.body;
+
     const session = await prisma.interviewSession.create({
       data: {
         id,
@@ -232,7 +286,10 @@ app.post('/api/history', async (req: Request, res: Response) => {
         date: new Date().toISOString().split('T')[0],
         duration,
         score,
-        skills: JSON.stringify(skills)
+        skills: JSON.stringify(skills),
+        mode: mode || 'full',
+        level: level || 'easy',
+        roundScores: roundScores ? JSON.stringify(roundScores) : null
       }
     });
 
@@ -245,7 +302,8 @@ app.post('/api/history', async (req: Request, res: Response) => {
         strengths: JSON.stringify(ans.strengths),
         improvements: JSON.stringify(ans.improvements),
         modelAnswer: ans.modelAnswer,
-        complexity: ans.complexity ? JSON.stringify(ans.complexity) : null
+        complexity: ans.complexity ? JSON.stringify(ans.complexity) : null,
+        roundType: ans.roundType || null
       }));
       
       await prisma.questionAnswer.createMany({ data: qas });
@@ -446,144 +504,132 @@ app.get('/api/questions', (req: Request, res: Response) => {
   res.json(mapped);
 });
 
-// --- 6. AI Answer Evaluation API ---
-app.post('/api/evaluate', (req: Request, res: Response) => {
-  try {
-    const { question, userAnswer, modelAnswer, category } = req.body;
-    
-    let score = 0;
-    let strengths: string[] = [];
-    let improvements: string[] = [];
-    let complexity: any = null;
-    
-    if (userAnswer === '[Question Skipped]') {
-      score = 0;
-      strengths = ['None (Question Skipped)'];
-      improvements = ['Ensure you attempt all questions. Even partial definitions build score.'];
-    } else if (category === 'Coding Interview' || question.includes('function') || question.includes('isValid') || question.includes('twoSum')) {
-      // Analyze Big-O based on user code heuristics
-      let timeComplexity = "O(N^2) - Suboptimal";
-      let spaceComplexity = "O(1) - Optimal";
-      
-      const code = userAnswer.toLowerCase();
-      if (code.includes("map") || code.includes("dict") || code.includes("seen") || code.includes("set")) {
-        timeComplexity = "O(N) - Optimal";
-        spaceComplexity = "O(N) - Standard";
-      } else if (code.includes("stack")) {
-        timeComplexity = "O(N) - Optimal";
-        spaceComplexity = "O(N) - Standard";
-      } else if (code.includes("while left < right") || code.includes("while (left < right)")) {
-        timeComplexity = "O(N) - Optimal";
-        spaceComplexity = "O(1) - Optimal";
-      }
-      
-      complexity = {
-        time: timeComplexity,
-        space: spaceComplexity
-      };
-      
-      const isOptimal = timeComplexity.includes("Optimal");
-      score = isOptimal ? Math.floor(Math.random() * 10) + 86 : Math.floor(Math.random() * 15) + 70;
-      
-      strengths = isOptimal 
-        ? ["Implemented optimal linear time complexity solution", "Effective use of auxiliary storage lookup map"]
-        : ["Correct logical structure to solve problem bounds"];
-      improvements = isOptimal
-        ? ["Could clean up inline comments", "Verify boundary edge cases (empty input array)"]
-        : ["Optimize nested loops using a hash dictionary to reduce time complexity to O(N)", "Explain space trade-offs in detailed comments"];
-    } else {
-      const len = userAnswer.trim().length;
-      if (len > 150) {
-        score = Math.floor(Math.random() * 15) + 81; // 81 - 95
-        strengths = ['Strong comprehensive depth shown', 'Good structure and flow of explanation'];
-        improvements = ['Could optimize specific syntax or API details', 'Explain alternative architectural paths'];
-      } else if (len > 40) {
-        score = Math.floor(Math.random() * 20) + 60; // 60 - 79
-        strengths = ['Understanding of core terms and definition present'];
-        improvements = ['Elaborate with practical projects or code examples', 'Provide detailed breakdown of underlying execution mechanics'];
-      } else {
-        score = Math.floor(Math.random() * 15) + 40; // 40 - 54
-        strengths = ['Basic terminology recognized'];
-        improvements = ['Answer is too short. Try to fully expand details using the STAR method.', 'Include specific API names and conceptual components.'];
-      }
-    }
-    
+// --- 6. AI Answer Evaluation API (Groq LLM) ---
+app.post('/api/evaluate', async (req: Request, res: Response) => {
+  const { question, userAnswer, modelAnswer, category, language } = req.body;
+
+  // Skipped questions score zero without spending an API call.
+  if (userAnswer === '[Question Skipped]') {
     res.json({
-      score,
-      strengths,
-      improvements,
+      score: 0,
+      strengths: [],
+      improvements: ['Question was skipped. Attempt every question — partial answers still earn credit.'],
       modelAnswer,
-      complexity
+      complexity: null,
+      feedback: 'No answer submitted.'
+    });
+    return;
+  }
+
+  const isCode = category === 'Coding Interview';
+
+  const systemPrompt = `You are a strict senior technical interviewer evaluating a candidate's answer.
+Score honestly and consistently — a vague or wrong answer scores low, a precise and complete answer scores high.
+${isCode
+    ? 'This is a coding answer. Judge correctness, edge-case handling, and efficiency, and report Big-O in "complexity".'
+    : 'This is a spoken/written technical or behavioral answer. Judge accuracy, depth, and clarity. Set "complexity" to null.'}
+Return ONLY valid JSON, no prose, in exactly this shape:
+{"score": <integer 0-100>, "strengths": [<string>...], "improvements": [<string>...], "complexity": ${isCode ? '"<Big-O time/space summary>"' : 'null'}, "feedback": "<2-3 sentence overall assessment>"}`;
+
+  const userPrompt = `Question:
+${question}
+${isCode && language ? `\nLanguage: ${language}` : ''}
+
+Candidate's answer:
+${userAnswer}`;
+
+  try {
+    const result = await callGroqJSON(systemPrompt, userPrompt);
+    res.json({
+      score: result.score,
+      strengths: Array.isArray(result.strengths) ? result.strengths : [],
+      improvements: Array.isArray(result.improvements) ? result.improvements : [],
+      modelAnswer,
+      complexity: result.complexity ?? null,
+      feedback: result.feedback ?? ''
     });
   } catch (e) {
-    res.status(500).json({ error: 'Failed to compile AI evaluation report' });
+    console.error('Evaluation failed:', e);
+    res.status(502).json({
+      error: 'AI evaluation failed',
+      detail: e instanceof Error ? e.message : 'Unknown error'
+    });
   }
 });
 
-app.post('/api/followup', (req: Request, res: Response) => {
+app.post('/api/followup', async (req: Request, res: Response) => {
+  const { questionText, userAnswer, category, role } = req.body;
+
+  if (userAnswer === '[Question Skipped]') {
+    res.json({ followup: null });
+    return;
+  }
+
+  const systemPrompt = `You are a senior technical interviewer conducting a live interview${role ? ` for a ${role} role` : ''}.
+Given the previous question and the candidate's answer, ask ONE relevant, probing follow-up question that digs deeper into what they said.
+Return ONLY valid JSON, no prose, in exactly this shape:
+{"followup": "<the single follow-up question>", "hint": "<one short hint on what a strong answer covers>"}`;
+
+  const userPrompt = `Category: ${category || 'Technical'}
+
+Previous question:
+${questionText}
+
+Candidate's answer:
+${userAnswer}`;
+
   try {
-    const { questionText, userAnswer, category, role } = req.body;
-    
-    // Fallback follow-up question
-    let followUpText = "Could you elaborate on the practical challenges you've faced when implementing this approach, and how you addressed them?";
-    let followUpHint = "Discuss testing, performance optimization, or team collaboration aspects.";
-    
-    if (userAnswer === '[Question Skipped]') {
+    const result = await callGroqJSON(systemPrompt, userPrompt);
+    if (!result.followup) {
       res.json({ followup: null });
       return;
     }
-
-    const answerLower = (userAnswer || "").toLowerCase();
-    const questionLower = (questionText || "").toLowerCase();
-
-    if (category === 'Coding Interview') {
-      if (answerLower.includes("for") && (answerLower.includes("dict") || answerLower.includes("map") || answerLower.includes("seen") || answerLower.includes("set"))) {
-        followUpText = `You implemented a lookup store (hash set/map) in your solution. What is the average time complexity for searching a key in this data structure, and what is the worst-case scenario?`;
-        followUpHint = "Explain the difference between optimal hash functions and hash collisions.";
-      } else if (answerLower.includes("stack")) {
-        followUpText = `You used a Stack to solve this problem. Can you explain why a Stack (LIFO structure) is more suitable here than a Queue (FIFO structure)?`;
-        followUpHint = "Think about matching parentheses or nested structures where the last opened item must be closed first.";
-      } else {
-        followUpText = `Your solution is functional. Can you describe how the time complexity would change if we optimized the nested loops to a single-pass linear time O(N) solution using a Hash Map?`;
-        followUpHint = "Detail the space-time trade-off of introducing auxiliary dictionary storage.";
-      }
-    } else if (category === 'HR Mock' || category === 'Behavioral') {
-      if (answerLower.includes("conflict") || answerLower.includes("disagree") || answerLower.includes("team")) {
-        followUpText = `That sounds like a challenging team dynamic. How did this experience shape the way you handle communication and alignment with peers in your subsequent projects?`;
-        followUpHint = "Highlight listening, empathy, or setting clear initial expectations.";
-      } else {
-        followUpText = `Can you specify the concrete results or metrics that measured the success of the project or solution you just described?`;
-        followUpHint = "Focus on numbers, percentages, user feedback, or time-saving statistics.";
-      }
-    } else {
-      // Technical categories (Frontend/Backend)
-      if (questionLower.includes("react") || answerLower.includes("state") || answerLower.includes("virtual dom")) {
-        if (answerLower.includes("state")) {
-          followUpText = `You mentioned state. Can you explain how React schedules and batches state updates, and how you would prevent unnecessary re-renders of child components?`;
-          followUpHint = "Mention React.memo, useMemo, useCallback, or state batching mechanics.";
-        } else {
-          followUpText = `React uses a Virtual DOM. Can you explain the reconciliation (diffing) algorithm React runs when state changes?`;
-          followUpHint = "Talk about keys, element type matching, and O(N) heuristic diffing.";
-        }
-      } else if (questionLower.includes("database") || questionLower.includes("sql") || answerLower.includes("index") || answerLower.includes("query")) {
-        followUpText = `You discussed database optimization. How do indexes speed up read operations under the hood, and what are the trade-offs of creating too many indexes on a table?`;
-        followUpHint = "Explain B-Trees/Hash index structures, write overhead (INSERT/UPDATE slowdown), and storage usage.";
-      } else if (questionLower.includes("rest") || questionLower.includes("api") || answerLower.includes("token") || answerLower.includes("jwt")) {
-        followUpText = `Regarding API security, what is the differences between cookies and localStorage for storing JWT auth tokens, particularly in terms of CSRF and XSS security vulnerabilities?`;
-        followUpHint = "Contrast httpOnly/secure cookies with standard localStorage access.";
-      }
-    }
-
     res.json({
       followup: {
-        id: "followup-" + Math.floor(Math.random() * 1000),
-        text: followUpText,
-        category: "Adaptive Follow-up",
-        hint: followUpHint
+        id: 'followup-' + Date.now(),
+        text: result.followup,
+        category: 'Adaptive Follow-up',
+        hint: result.hint || ''
       }
     });
   } catch (e) {
-    res.status(500).json({ error: 'Failed to generate follow-up question' });
+    console.error('Follow-up generation failed:', e);
+    res.status(502).json({
+      error: 'AI follow-up failed',
+      detail: e instanceof Error ? e.message : 'Unknown error'
+    });
+  }
+});
+
+// --- 8. Level-aware AI Recommendations (Groq LLM) ---
+// Replaces any static "score x level" lookup table with a real model call.
+app.post('/api/recommend', async (req: Request, res: Response) => {
+  const { role, level, overallScore, roundScores, weakAreas } = req.body;
+
+  const systemPrompt = `You are a career interview coach reviewing a candidate's mock-interview results for a ${role || 'tech'} role at "${level || 'easy'}" difficulty.
+The pass thresholds are: easy 50%, medium 60%, advanced 70%.
+Give honest, specific, encouraging guidance. Reference the actual round scores.
+Return ONLY valid JSON, no prose, in exactly this shape:
+{"strengths": [<string>...], "focusAreas": [<string>...], "levelAdvice": "<one sentence: should they move up a level, repeat, or drop down>", "nextSteps": "<one concrete sentence naming topics to study next>"}`;
+
+  const userPrompt = `Overall score: ${overallScore}%
+Per-round scores: ${JSON.stringify(roundScores || {})}
+Weakest areas / topics: ${JSON.stringify(weakAreas || [])}`;
+
+  try {
+    const result = await callGroqJSON(systemPrompt, userPrompt);
+    res.json({
+      strengths: Array.isArray(result.strengths) ? result.strengths : [],
+      focusAreas: Array.isArray(result.focusAreas) ? result.focusAreas : [],
+      levelAdvice: result.levelAdvice || '',
+      nextSteps: result.nextSteps || ''
+    });
+  } catch (e) {
+    console.error('Recommendation generation failed:', e);
+    res.status(502).json({
+      error: 'AI recommendation failed',
+      detail: e instanceof Error ? e.message : 'Unknown error'
+    });
   }
 });
 
